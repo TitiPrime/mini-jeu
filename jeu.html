@@ -2,26 +2,89 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
   <title>Avoid Them</title>
   <style>
-    body{margin:0;background:#0b1020;color:#fff;font-family:system-ui,Arial;display:grid;place-items:center;height:100vh}
+    :root{--bg:#0b1020;--panel:#0f1733;--stroke:#2a3a7a}
+    body{
+      margin:0;background:var(--bg);color:#fff;font-family:system-ui,Arial;
+      display:grid;place-items:center;min-height:100vh; padding:10px;
+      touch-action: none; /* évite scroll/zoom pendant le jeu */
+    }
     #wrap{width:min(900px,95vw)}
-    canvas{width:100%;height:auto;background:#0f1733;border:2px solid #2a3a7a;border-radius:14px;display:block}
-    .hud{display:flex;gap:12px;justify-content:space-between;align-items:center;margin:10px 2px}
-    button{padding:10px 14px;border-radius:12px;border:1px solid #2a3a7a;background:#17224a;color:#fff;cursor:pointer}
+    canvas{
+      width:100%; height:auto; background:var(--panel);
+      border:2px solid var(--stroke); border-radius:14px; display:block;
+    }
+    .hud{
+      display:flex; gap:12px; justify-content:space-between; align-items:center;
+      margin:10px 2px; flex-wrap:wrap;
+    }
+    button{
+      padding:10px 14px;border-radius:12px;border:1px solid var(--stroke);
+      background:#17224a;color:#fff;cursor:pointer
+    }
     button:hover{filter:brightness(1.1)}
-    .hint{opacity:.8;font-size:14px}
+    .hint{opacity:.85;font-size:14px}
+    .hint b{opacity:1}
+
+    /* Joystick tactile */
+    .touch-ui{
+      position:fixed; left:0; right:0; bottom:0;
+      padding:16px; pointer-events:none; /* on active seulement le joystick */
+    }
+    .joy{
+      width:140px; height:140px; border-radius:999px;
+      border:2px solid rgba(124,243,255,.35);
+      background:rgba(15,23,51,.55);
+      backdrop-filter: blur(4px);
+      pointer-events:auto;
+      position:relative;
+      user-select:none;
+      touch-action:none;
+    }
+    .knob{
+      width:58px; height:58px; border-radius:999px;
+      background:rgba(124,243,255,.85);
+      position:absolute; left:50%; top:50%;
+      transform:translate(-50%,-50%);
+      box-shadow:0 10px 25px rgba(0,0,0,.35);
+    }
+    .touch-row{
+      display:flex; justify-content:space-between; align-items:flex-end;
+      max-width:min(900px,95vw); margin:0 auto;
+    }
+    .mobile-only{display:none}
+    @media (pointer:coarse){
+      .mobile-only{display:block}
+    }
   </style>
 </head>
 <body>
 <div id="wrap">
   <div class="hud">
     <div><b>Score:</b> <span id="score">0</span> | <b>Record:</b> <span id="best">0</span></div>
-    <div class="hint">Déplacements: ← → ↑ ↓ (ou ZQSD)</div>
+    <div class="hint">
+      PC: <b>← → ↑ ↓</b> (ou <b>ZQSD</b>) • Mobile: <b>joystick</b>
+    </div>
     <button id="restart">Recommencer</button>
   </div>
-  <canvas id="game" width="900" height="520"></canvas>
+
+  <!-- Canvas “logique” (on le redimensionne en JS selon l’écran) -->
+  <canvas id="game"></canvas>
+</div>
+
+<!-- Joystick (mobile) -->
+<div class="touch-ui mobile-only">
+  <div class="touch-row">
+    <div class="joy" id="joy">
+      <div class="knob" id="knob"></div>
+    </div>
+    <div style="opacity:.7;font-size:13px;max-width:220px;text-align:right">
+      Astuce : garde le pouce sur le joystick.<br/>
+      Le bouton <b>Recommencer</b> reste en haut.
+    </div>
+  </div>
 </div>
 
 <script>
@@ -32,14 +95,98 @@
   const bestEl = document.getElementById("best");
   const restartBtn = document.getElementById("restart");
 
-  const W = canvas.width, H = canvas.height;
+  // --- Taille canvas (responsive + retina)
+  function resizeCanvas(){
+    const cssW = Math.min(900, Math.floor(document.getElementById("wrap").clientWidth));
+    const cssH = Math.floor(cssW * 520 / 900); // garde le ratio du jeu
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    canvas.style.width = cssW + "px";
+    canvas.style.height = cssH + "px";
+    canvas.width = Math.floor(cssW * dpr);
+    canvas.height = Math.floor(cssH * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0); // on dessine en “pixels CSS”
+    W = cssW; H = cssH;
+  }
+
+  let W = 900, H = 520;
+  window.addEventListener("resize", resizeCanvas);
+  resizeCanvas();
+
   const clamp = (v,min,max)=>Math.max(min,Math.min(max,v));
   const rnd = (a,b)=>a+Math.random()*(b-a);
 
+  // --- Clavier (PC)
   let keys = new Set();
   window.addEventListener("keydown", e => keys.add(e.key.toLowerCase()));
   window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
 
+  // --- Joystick (mobile)
+  const joy = document.getElementById("joy");
+  const knob = document.getElementById("knob");
+  let joyActive = false;
+  let joyId = null;
+  let joyCenter = {x:0,y:0};
+  let joyVec = {x:0,y:0}; // -1..1
+
+  function setKnob(x,y){
+    knob.style.transform = `translate(${x}px, ${y}px)`;
+  }
+  function resetJoy(){
+    joyVec.x = 0; joyVec.y = 0;
+    knob.style.transform = "translate(-50%,-50%)";
+  }
+
+  function updateJoyCenter(){
+    const r = joy.getBoundingClientRect();
+    joyCenter.x = r.left + r.width/2;
+    joyCenter.y = r.top + r.height/2;
+  }
+  if(joy){
+    updateJoyCenter();
+    window.addEventListener("resize", updateJoyCenter);
+
+    joy.addEventListener("pointerdown", (e) => {
+      joyActive = true;
+      joyId = e.pointerId;
+      joy.setPointerCapture(joyId);
+      updateJoyCenter();
+      e.preventDefault();
+    });
+
+    joy.addEventListener("pointermove", (e) => {
+      if(!joyActive || e.pointerId !== joyId) return;
+      const dx = e.clientX - joyCenter.x;
+      const dy = e.clientY - joyCenter.y;
+      const max = 50; // rayon utile
+      const len = Math.hypot(dx,dy) || 1;
+      const nx = clamp(dx/len, -1, 1) * Math.min(len, max)/max;
+      const ny = clamp(dy/len, -1, 1) * Math.min(len, max)/max;
+
+      joyVec.x = nx;
+      joyVec.y = ny;
+
+      // place le knob (en px)
+      const kx = (-50 + nx*50);
+      const ky = (-50 + ny*50);
+      knob.style.transform = `translate(calc(-50% + ${nx*50}px), calc(-50% + ${ny*50}px))`;
+      e.preventDefault();
+    });
+
+    const end = (e) => {
+      if(!joyActive || e.pointerId !== joyId) return;
+      joyActive = false;
+      joyId = null;
+      resetJoy();
+      e.preventDefault();
+    };
+    joy.addEventListener("pointerup", end);
+    joy.addEventListener("pointercancel", end);
+  }
+
+  // Empêche le scroll “accidentel” pendant le jeu sur mobile
+  document.addEventListener("touchmove", (e)=>{ e.preventDefault(); }, {passive:false});
+
+  // --- Score best
   const bestKey = "mini_avoid_best";
   let best = Number(localStorage.getItem(bestKey) || 0);
   bestEl.textContent = best;
@@ -52,14 +199,11 @@
     t = 0;
     score = 0;
     over = false;
-    spawnEnemy(true);
-    spawnEnemy(true);
-    spawnEnemy(true);
+    spawnEnemy(true); spawnEnemy(true); spawnEnemy(true);
     scoreEl.textContent = "0";
   }
 
   function spawnEnemy(initial=false){
-    // Spawn sur un bord pour que ce soit fair
     const side = Math.floor(rnd(0,4));
     let x,y;
     if(side===0){ x = -20; y = rnd(0,H); }
@@ -69,11 +213,7 @@
 
     const sp = rnd(120, 220) * (initial ? 1 : 1 + score/80);
     const ang = Math.atan2(player.y - y, player.x - x) + rnd(-0.35, 0.35);
-    enemies.push({
-      x,y, r: rnd(12,18),
-      vx: Math.cos(ang)*sp,
-      vy: Math.sin(ang)*sp
-    });
+    enemies.push({ x,y, r: rnd(12,18), vx: Math.cos(ang)*sp, vy: Math.sin(ang)*sp });
   }
 
   function collide(a,b){
@@ -83,6 +223,7 @@
   }
 
   function input(dt){
+    // clavier
     const up = keys.has("arrowup") || keys.has("z");
     const down = keys.has("arrowdown") || keys.has("s");
     const left = keys.has("arrowleft") || keys.has("q") || keys.has("a");
@@ -91,12 +232,18 @@
     let ax = (right?1:0) - (left?1:0);
     let ay = (down?1:0) - (up?1:0);
 
-    // Normalise diagonale
-    const len = Math.hypot(ax,ay) || 1;
-    ax/=len; ay/=len;
+    // joystick (mobile) : prioritaire si actif, sinon il ajoute une direction douce
+    if(Math.abs(joyVec.x) + Math.abs(joyVec.y) > 0.01){
+      ax = joyVec.x;
+      ay = joyVec.y;
+    }
 
-    player.vx = ax * player.speed;
-    player.vy = ay * player.speed;
+    // normalise si besoin (pour diagonales clavier)
+    const len = Math.hypot(ax,ay) || 1;
+    const nx = ax/len, ny = ay/len;
+
+    player.vx = nx * player.speed;
+    player.vy = ny * player.speed;
 
     player.x = clamp(player.x + player.vx*dt, player.r, W-player.r);
     player.y = clamp(player.y + player.vy*dt, player.r, H-player.r);
@@ -106,25 +253,21 @@
     if(over) return;
 
     t += dt;
-    score += dt * 10; // points / seconde
+    score += dt * 10;
     scoreEl.textContent = Math.floor(score);
 
-    // Spawn progressif
     if(t > 1.2){
       t = 0;
       spawnEnemy(false);
     }
 
-    // Update enemies
     for(const e of enemies){
       e.x += e.vx*dt;
       e.y += e.vy*dt;
     }
 
-    // Remove hors écran + marge
     enemies = enemies.filter(e => e.x>-60 && e.x<W+60 && e.y>-60 && e.y<H+60);
 
-    // Collisions
     for(const e of enemies){
       if(collide(player,e)){
         over = true;
@@ -136,11 +279,11 @@
   }
 
   function draw(){
-    // Background
     ctx.clearRect(0,0,W,H);
 
-    // Petites étoiles
+    // étoiles
     ctx.globalAlpha = 0.25;
+    ctx.fillStyle = "#ffffff";
     for(let i=0;i<40;i++){
       ctx.beginPath();
       ctx.arc((i*97)%W, (i*173)%H, 1.4, 0, Math.PI*2);
@@ -148,30 +291,29 @@
     }
     ctx.globalAlpha = 1;
 
-    // Player
+    // player
     ctx.beginPath();
     ctx.arc(player.x, player.y, player.r, 0, Math.PI*2);
     ctx.fillStyle = "#7cf3ff";
     ctx.fill();
 
-    // Enemies
+    // enemies
+    ctx.fillStyle = "#ff5f7a";
     for(const e of enemies){
       ctx.beginPath();
       ctx.arc(e.x, e.y, e.r, 0, Math.PI*2);
-      ctx.fillStyle = "#ff5f7a";
       ctx.fill();
     }
 
-    // Game Over overlay
     if(over){
       ctx.fillStyle = "rgba(0,0,0,0.55)";
       ctx.fillRect(0,0,W,H);
       ctx.fillStyle = "#fff";
-      ctx.font = "bold 52px system-ui";
+      ctx.font = "bold 44px system-ui";
       ctx.textAlign = "center";
       ctx.fillText("GAME OVER", W/2, H/2 - 10);
-      ctx.font = "20px system-ui";
-      ctx.fillText("Clique sur Recommencer", W/2, H/2 + 32);
+      ctx.font = "18px system-ui";
+      ctx.fillText("Appuie sur Recommencer", W/2, H/2 + 28);
       ctx.textAlign = "left";
     }
   }
@@ -194,4 +336,3 @@
 </script>
 </body>
 </html>
-
